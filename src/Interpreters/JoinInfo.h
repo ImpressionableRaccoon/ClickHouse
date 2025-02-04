@@ -182,6 +182,15 @@ String toString(const JoinCondition & condition);
     M(Bool, allow_experimental_join_condition) \
     \
     M(UInt64, cross_to_inner_join_rewrite) \
+    \
+    M(UInt64, max_joined_block_size_rows) \
+    M(String, temporary_files_codec) \
+    M(UInt64, join_output_by_rowlist_perkey_rows_threshold) \
+    M(UInt64, join_to_sort_minimum_perkey_rows) \
+    M(UInt64, join_to_sort_maximum_table_rows) \
+    M(Bool, allow_experimental_join_right_table_sorting) \
+    M(UInt64, min_joined_block_size_bytes) \
+    M(UInt64, max_threads) \
 
 
 /// Subset of query settings that are relevant to join and used to configure join algorithms.

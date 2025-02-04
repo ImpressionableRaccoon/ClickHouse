@@ -19,6 +19,14 @@
 #include <Planner/PlannerJoins.h>
 #include <DataTypes/DataTypesNumber.h>
 
+#include <Functions/FunctionsLogical.h>
+#include <Functions/IFunctionAdaptors.h>
+#include <Functions/FunctionsComparison.h>
+#include <Functions/IsOperation.h>
+#include <Functions/tuple.h>
+#include <Functions/toNullable.h>
+#include <Functions/isNotDistinctFrom.h>
+
 namespace DB
 {
 
@@ -36,17 +44,22 @@ namespace ErrorCodes
     extern const int NOT_FOUND_COLUMN_IN_BLOCK;
 }
 
+extern template class FunctionComparison<EqualsOp, NameEquals>;
+extern template class FunctionComparison<LessOp, NameLess>;
+extern template class FunctionComparison<LessOrEqualsOp, NameLessOrEquals>;
+extern template class FunctionComparison<GreaterOp, NameGreater>;
+extern template class FunctionComparison<GreaterOrEqualsOp, NameGreaterOrEquals>;
 
-std::string toFunctionName(PredicateOperator op)
+std::shared_ptr<IFunction> operatorToFunction(PredicateOperator op)
 {
     switch (op)
     {
-        case PredicateOperator::Equals: return "equals";
-        case PredicateOperator::NullSafeEquals: return "isNotDistinctFrom";
-        case PredicateOperator::Less: return "less";
-        case PredicateOperator::LessOrEquals: return "lessOrEquals";
-        case PredicateOperator::Greater: return "greater";
-        case PredicateOperator::GreaterOrEquals: return "greaterOrEquals";
+        case PredicateOperator::NullSafeEquals: return std::make_shared<FunctionIsNotDistinctFrom>();
+        case PredicateOperator::Equals: return std::make_shared<FunctionComparison<EqualsOp, NameEquals>>(ComparisonParams{});
+        case PredicateOperator::Less: return std::make_shared<FunctionComparison<LessOp, NameLess>>(ComparisonParams{});
+        case PredicateOperator::LessOrEquals: return std::make_shared<FunctionComparison<LessOrEqualsOp, NameLessOrEquals>>(ComparisonParams{});
+        case PredicateOperator::Greater: return std::make_shared<FunctionComparison<GreaterOp, NameGreater>>(ComparisonParams{});
+        case PredicateOperator::GreaterOrEquals: return std::make_shared<FunctionComparison<GreaterOrEqualsOp, NameGreaterOrEquals>>(ComparisonParams{});
     }
     throw Exception(ErrorCodes::LOGICAL_ERROR, "Illegal value for PredicateOperator: {}", static_cast<Int32>(op));
 }
@@ -115,13 +128,16 @@ JoinStepLogical::JoinStepLogical(
     JoinInfo join_info_,
     JoinExpressionActions join_expression_actions_,
     Names required_output_columns_,
-    ContextPtr context_)
+    ContextPtr query_context_)
     : expression_actions(std::move(join_expression_actions_))
     , join_info(std::move(join_info_))
     , required_output_columns(std::move(required_output_columns_))
-    , query_context(std::move(context_))
-    , join_settings(JoinSettings::create(query_context->getSettingsRef()))
-    , sorting_settings(*query_context)
+    , join_settings(JoinSettings::create(query_context_->getSettingsRef()))
+    , sorting_settings(*query_context_)
+    , expression_actions_settings(query_context_->getSettingsRef())
+    , tmp_volume(query_context_->getGlobalTemporaryVolume())
+    , tmp_data(query_context_->getTempDataOnDisk())
+    , query_context(std::move(query_context_))
 {
     updateInputHeaders({left_header_, right_header_});
 }
@@ -148,7 +164,6 @@ void JoinStepLogical::describeActions(FormatSettings & settings) const
     settings.out << prefix << "Post Expression:\n";
     ExpressionActions(expression_actions.post_join_actions.clone()).describeActions(settings.out, prefix);
     settings.out << prefix << "Left Expression:\n";
-    // settings.out << expression_actions.left_pre_join_actions.dumpDAG();
     ExpressionActions(expression_actions.left_pre_join_actions.clone()).describeActions(settings.out, prefix);
     settings.out << prefix << "Right Expression:\n";
     ExpressionActions(expression_actions.right_pre_join_actions.clone()).describeActions(settings.out, prefix);
@@ -226,7 +241,8 @@ JoinActionRef toBoolIfNeeded(JoinActionRef condition, ActionsDAG & actions_dag, 
     return condition;
 }
 
-JoinActionRef concatConditions(const std::vector<JoinActionRef> & conditions, ActionsDAG & actions_dag, const FunctionOverloadResolverPtr & concat_function)
+JoinActionRef concatConditionsWithFunction(
+    const std::vector<JoinActionRef> & conditions, ActionsDAG & actions_dag, const FunctionOverloadResolverPtr & concat_function)
 {
     if (conditions.empty())
         return JoinActionRef(nullptr);
@@ -252,15 +268,48 @@ JoinActionRef concatConditions(const std::vector<JoinActionRef> & conditions, Ac
     return JoinActionRef(&result_node);
 }
 
-JoinActionRef concatConditions(const std::vector<JoinActionRef> & conditions, ActionsDAG & actions_dag, const ContextPtr & query_context)
+JoinActionRef concatConditions(const std::vector<JoinActionRef> & conditions, ActionsDAG & actions_dag)
 {
-    auto and_function = FunctionFactory::instance().get("and", query_context);
-    return concatConditions(conditions, actions_dag, and_function);
+    FunctionOverloadResolverPtr and_function = std::make_unique<FunctionToOverloadResolverAdaptor>(std::make_shared<FunctionAnd>());
+    return concatConditionsWithFunction(conditions, actions_dag, and_function);
 }
 
-JoinActionRef concatMergeConditions(std::vector<JoinActionRef> & conditions, ActionsDAG & actions_dag, const ContextPtr & query_context)
+
+using ActionDAGNodeSet = std::unordered_set<const ActionsDAG::Node *>;
+
+void getUsedNodes(const JoinCondition & condition, ActionDAGNodeSet & used_nodes)
 {
-    auto condition = concatConditions(conditions, actions_dag, query_context);
+    for (const auto & predicate : condition.predicates)
+    {
+        used_nodes.insert(predicate.left_node.node);
+        used_nodes.insert(predicate.right_node.node);
+    }
+
+    for (const auto & filter : condition.left_filter_conditions)
+        used_nodes.insert(filter.node);
+
+    for (const auto & filter : condition.right_filter_conditions)
+        used_nodes.insert(filter.node);
+
+    for (const auto & residual : condition.residual_conditions)
+        used_nodes.insert(residual.node);
+
+}
+
+ActionDAGNodeSet getUsedNodes(const JoinExpression & join_expression)
+{
+    ActionDAGNodeSet used_nodes;
+
+    getUsedNodes(join_expression.condition, used_nodes);
+    for (const auto & condition : join_expression.disjunctive_conditions)
+        getUsedNodes(condition, used_nodes);
+
+    return used_nodes;
+}
+
+JoinActionRef concatMergeConditions(std::vector<JoinActionRef> & conditions, ActionsDAG & actions_dag)
+{
+    auto condition = concatConditions(conditions, actions_dag);
     conditions.clear();
     if (condition)
         conditions = {condition};
@@ -285,13 +334,12 @@ const ActionsDAG::Node & findInput(ActionsDAG & actions_dag, const JoinActionRef
     throw Exception(ErrorCodes::NOT_FOUND_COLUMN_IN_BLOCK, "Column {} not found in actions DAG: {}", action.column_name, actions_dag.dumpDAG());
 }
 
-
-JoinActionRef predicateToCondition(const JoinPredicate & predicate, ActionsDAG & actions_dag, const ContextPtr & query_context)
+JoinActionRef predicateToCondition(const JoinPredicate & predicate, ActionsDAG & actions_dag)
 {
     const auto & left_node = findInput(actions_dag, predicate.left_node, true);
     const auto & right_node = findInput(actions_dag, predicate.right_node, true);
 
-    auto operator_function = FunctionFactory::instance().get(toFunctionName(predicate.op), query_context);
+    FunctionOverloadResolverPtr operator_function = std::make_shared<FunctionToOverloadResolverAdaptor>(operatorToFunction(predicate.op));
     const auto & result_node = actions_dag.addFunction(operator_function, {&left_node, &right_node}, {});
     return JoinActionRef(&result_node);
 }
@@ -313,7 +361,8 @@ bool canPushDownFromOn(const JoinInfo & join_info, std::optional<JoinTableSide> 
 void addRequiredInputToOutput(ActionsDAG & dag, const NameSet & required_output_columns)
 {
     NameSet existing_output_columns;
-    for (const auto & node : dag.getOutputs())
+    auto & outputs = dag.getOutputs();
+    for (const auto & node : outputs)
         existing_output_columns.insert(node->result_name);
 
     for (const auto * node : dag.getInputs())
@@ -321,10 +370,19 @@ void addRequiredInputToOutput(ActionsDAG & dag, const NameSet & required_output_
         if (!required_output_columns.contains(node->result_name)
          || existing_output_columns.contains(node->result_name))
             continue;
-        dag.addOrReplaceInOutputs(*node);
+        outputs.push_back(node);
     }
 }
 
+void trimDAGOutputs(const ActionDAGNodeSet & used_nodes, const NameSet & required_output_columns, ActionsDAG & actions_dag)
+{
+    auto & outputs = actions_dag.getOutputs();
+    outputs.erase(std::remove_if(outputs.begin(), outputs.end(),
+        [&](const auto & node) { return !used_nodes.contains(node); }), outputs.end());
+
+    addRequiredInputToOutput(actions_dag, required_output_columns);
+    actions_dag.removeUnusedActions();
+}
 
 struct JoinPlanningContext
 {
@@ -376,7 +434,7 @@ std::tuple<const ActionsDAG::Node *, const ActionsDAG::Node *> leftAndRightNodes
     return {predicate.left_node.node, predicate.right_node.node};
 }
 
-bool addJoinConditionToTableJoin(JoinCondition & join_condition, TableJoin::JoinOnClause & table_join_clause, JoinExpressionActions & expression_actions, const ContextPtr & query_context, JoinPlanningContext join_context)
+bool addJoinConditionToTableJoin(JoinCondition & join_condition, TableJoin::JoinOnClause & table_join_clause, JoinExpressionActions & expression_actions, JoinPlanningContext join_context)
 {
     std::vector<JoinPredicate> new_predicates;
     for (size_t i = 0; i < join_condition.predicates.size(); ++i)
@@ -400,7 +458,8 @@ bool addJoinConditionToTableJoin(JoinCondition & join_condition, TableJoin::Join
                   * This will be semantically transformed to:
                   *   SELECT * FROM t1 JOIN t2 ON tuple(t1.a) == tuple(t2.b)
                   */
-                auto wrap_nullsafe_function = FunctionFactory::instance().get("tuple", query_context);
+
+                FunctionOverloadResolverPtr wrap_nullsafe_function = std::make_shared<FunctionToOverloadResolverAdaptor>(std::make_shared<FunctionTuple>());
                 predicate.left_node = JoinActionRef(&expression_actions.left_pre_join_actions.addFunction(wrap_nullsafe_function, {left_key_node}, {}));
                 predicate.right_node = JoinActionRef(&expression_actions.right_pre_join_actions.addFunction(wrap_nullsafe_function, {right_key_node}, {}));
 
@@ -419,7 +478,7 @@ bool addJoinConditionToTableJoin(JoinCondition & join_condition, TableJoin::Join
         else
         {
             /// Move non-equality predicates to residual conditions
-            auto predicate_action = predicateToCondition(predicate, expression_actions.post_join_actions, query_context);
+            auto predicate_action = predicateToCondition(predicate, expression_actions.post_join_actions);
             join_condition.residual_conditions.push_back(predicate_action);
         }
     }
@@ -429,51 +488,51 @@ bool addJoinConditionToTableJoin(JoinCondition & join_condition, TableJoin::Join
     return !join_condition.predicates.empty();
 }
 
-JoinActionRef buildSingleActionForJoinCondition(const JoinCondition & join_condition, JoinExpressionActions & expression_actions, const ContextPtr & query_context)
+JoinActionRef buildSingleActionForJoinCondition(const JoinCondition & join_condition, JoinExpressionActions & expression_actions)
 {
     std::vector<JoinActionRef> all_conditions;
-    auto left_filter_conditions_action = concatConditions(join_condition.left_filter_conditions, expression_actions.left_pre_join_actions, query_context);
+    auto left_filter_conditions_action = concatConditions(join_condition.left_filter_conditions, expression_actions.left_pre_join_actions);
     if (left_filter_conditions_action)
     {
         left_filter_conditions_action.node = &findInput(expression_actions.post_join_actions, left_filter_conditions_action, true);
         all_conditions.push_back(left_filter_conditions_action);
     }
 
-    auto right_filter_conditions_action = concatConditions(join_condition.right_filter_conditions, expression_actions.right_pre_join_actions, query_context);
+    auto right_filter_conditions_action = concatConditions(join_condition.right_filter_conditions, expression_actions.right_pre_join_actions);
     if (right_filter_conditions_action)
     {
         right_filter_conditions_action.node = &findInput(expression_actions.post_join_actions, right_filter_conditions_action, true);
         all_conditions.push_back(right_filter_conditions_action);
     }
 
-    auto residual_conditions_action = concatConditions(join_condition.residual_conditions, expression_actions.post_join_actions, query_context);
+    auto residual_conditions_action = concatConditions(join_condition.residual_conditions, expression_actions.post_join_actions);
     if (residual_conditions_action)
         all_conditions.push_back(residual_conditions_action);
 
     for (const auto & predicate : join_condition.predicates)
     {
-        auto predicate_action = predicateToCondition(predicate, expression_actions.post_join_actions, query_context);
+        auto predicate_action = predicateToCondition(predicate, expression_actions.post_join_actions);
         all_conditions.push_back(predicate_action);
     }
 
-    return concatConditions(all_conditions, expression_actions.post_join_actions, query_context);
+    return concatConditions(all_conditions, expression_actions.post_join_actions);
 }
 
-JoinActionRef buildSingleActionForJoinExpression(const JoinExpression & join_expression, JoinExpressionActions & expression_actions, const ContextPtr & query_context)
+JoinActionRef buildSingleActionForJoinExpression(const JoinExpression & join_expression, JoinExpressionActions & expression_actions)
 {
     std::vector<JoinActionRef> all_conditions;
 
-    if (auto condition = buildSingleActionForJoinCondition(join_expression.condition, expression_actions, query_context))
+    if (auto condition = buildSingleActionForJoinCondition(join_expression.condition, expression_actions))
         all_conditions.push_back(condition);
 
     for (const auto & join_condition : join_expression.disjunctive_conditions)
-        if (auto condition = buildSingleActionForJoinCondition(join_condition, expression_actions, query_context))
+        if (auto condition = buildSingleActionForJoinCondition(join_condition, expression_actions))
             all_conditions.push_back(condition);
 
-    auto or_function = FunctionFactory::instance().get("or", query_context);
-    return concatConditions(all_conditions, expression_actions.post_join_actions, or_function);
-}
 
+    FunctionOverloadResolverPtr or_function = std::make_unique<FunctionToOverloadResolverAdaptor>(std::make_shared<FunctionOr>());
+    return concatConditionsWithFunction(all_conditions, expression_actions.post_join_actions, or_function);
+}
 
 void JoinStepLogical::setHashTableCacheKey(IQueryTreeNode::HashState hash_table_key_hash_) { hash_table_key_hash = std::move(hash_table_key_hash_); }
 void JoinStepLogical::setPreparedJoinStorage(PreparedJoinStorage storage) { prepared_join_storage = std::move(storage); }
@@ -501,9 +560,7 @@ static void addToNullableActions(ActionsDAG & dag, const FunctionOverloadResolve
 
 JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActionRef & right_filter, JoinActionRef & post_filter, bool is_explain_logical)
 {
-    const auto & settings = query_context->getSettingsRef();
-
-    auto table_join = std::make_shared<TableJoin>(settings, query_context->getGlobalTemporaryVolume(), query_context->getTempDataOnDisk());
+    auto table_join = std::make_shared<TableJoin>(join_settings, tmp_volume, tmp_data);
 
     auto & join_expression = join_info.expression;
 
@@ -530,7 +587,7 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
     {
         bool has_keys = addJoinConditionToTableJoin(
             join_expression.condition, table_join_clauses.emplace_back(),
-            expression_actions, query_context, join_context);
+            expression_actions, join_context);
 
         if (!has_keys)
         {
@@ -549,7 +606,7 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
         }
     }
 
-    if (auto left_pre_filter_condition = concatMergeConditions(join_expression.condition.left_filter_conditions, expression_actions.left_pre_join_actions, query_context))
+    if (auto left_pre_filter_condition = concatMergeConditions(join_expression.condition.left_filter_conditions, expression_actions.left_pre_join_actions))
     {
         if (canPushDownFromOn(join_info, JoinTableSide::Left))
             left_filter = left_pre_filter_condition;
@@ -557,7 +614,7 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
             table_join_clauses.back().analyzer_left_filter_condition_column_name = left_pre_filter_condition.column_name;
     }
 
-    if (auto right_pre_filter_condition = concatMergeConditions(join_expression.condition.right_filter_conditions, expression_actions.right_pre_join_actions, query_context))
+    if (auto right_pre_filter_condition = concatMergeConditions(join_expression.condition.right_filter_conditions, expression_actions.right_pre_join_actions))
     {
         if (canPushDownFromOn(join_info, JoinTableSide::Right))
             right_filter = right_pre_filter_condition;
@@ -595,10 +652,10 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
     for (auto & join_condition : join_expression.disjunctive_conditions)
     {
         auto & table_join_clause = table_join_clauses.emplace_back();
-        addJoinConditionToTableJoin(join_condition, table_join_clause, expression_actions, query_context, join_context);
-        if (auto left_pre_filter_condition = concatMergeConditions(join_condition.left_filter_conditions, expression_actions.left_pre_join_actions, query_context))
+        addJoinConditionToTableJoin(join_condition, table_join_clause, expression_actions, join_context);
+        if (auto left_pre_filter_condition = concatMergeConditions(join_condition.left_filter_conditions, expression_actions.left_pre_join_actions))
             table_join_clause.analyzer_left_filter_condition_column_name = left_pre_filter_condition.column_name;
-        if (auto right_pre_filter_condition = concatMergeConditions(join_condition.right_filter_conditions, expression_actions.right_pre_join_actions, query_context))
+        if (auto right_pre_filter_condition = concatMergeConditions(join_condition.right_filter_conditions, expression_actions.right_pre_join_actions))
             table_join_clause.analyzer_right_filter_condition_column_name = right_pre_filter_condition.column_name;
     }
 
@@ -606,7 +663,7 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
     if (join_expression.disjunctive_conditions.empty())
     {
         residual_filter_condition = concatMergeConditions(
-            join_expression.condition.residual_conditions, expression_actions.post_join_actions, query_context);
+            join_expression.condition.residual_conditions, expression_actions.post_join_actions);
     }
     else
     {
@@ -619,7 +676,7 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
         }
 
         if (need_residual_filter)
-            residual_filter_condition = buildSingleActionForJoinExpression(join_expression, expression_actions, query_context);
+            residual_filter_condition = buildSingleActionForJoinExpression(join_expression, expression_actions);
     }
 
     bool need_add_nullable = join_info.kind == JoinKind::Left
@@ -635,7 +692,7 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
                 toString(join_info.kind), residual_filter_condition.column_name);
         }
 
-        auto to_nullable_function = FunctionFactory::instance().get("toNullable", query_context);
+        FunctionOverloadResolverPtr to_nullable_function = std::make_unique<FunctionToOverloadResolverAdaptor>(std::make_shared<FunctionToNullable>());
         if (join_info.kind == JoinKind::Left || join_info.kind == JoinKind::Full)
             addToNullableActions(expression_actions.right_pre_join_actions, to_nullable_function);
         if (join_info.kind == JoinKind::Right || join_info.kind == JoinKind::Full)
@@ -670,12 +727,10 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
             }
         }
         ExpressionActionsPtr & mixed_join_expression = table_join->getMixedJoinExpression();
-        mixed_join_expression = std::make_shared<ExpressionActions>(std::move(dag), ExpressionActionsSettings(query_context));
+        mixed_join_expression = std::make_shared<ExpressionActions>(std::move(dag), expression_actions_settings);
     }
 
     NameSet required_output_columns_set(required_output_columns.begin(), required_output_columns.end());
-    addRequiredInputToOutput(expression_actions.left_pre_join_actions, required_output_columns_set);
-    addRequiredInputToOutput(expression_actions.right_pre_join_actions, required_output_columns_set);
     addRequiredInputToOutput(expression_actions.post_join_actions, required_output_columns_set);
 
     ActionsDAG::NodeRawConstPtrs new_outputs;
@@ -694,6 +749,12 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
         new_outputs.push_back(post_filter.node);
     expression_actions.post_join_actions.getOutputs() = std::move(new_outputs);
     expression_actions.post_join_actions.removeUnusedActions();
+
+    auto used_nodes = getUsedNodes(join_expression);
+    for (const auto * node : expression_actions.post_join_actions.getInputs())
+        required_output_columns_set.insert(node->result_name);
+    trimDAGOutputs(used_nodes, required_output_columns_set, expression_actions.left_pre_join_actions);
+    trimDAGOutputs(used_nodes, required_output_columns_set, expression_actions.right_pre_join_actions);
 
     table_join->setInputColumns(
         expression_actions.left_pre_join_actions.getNamesAndTypesList(),
@@ -724,6 +785,38 @@ JoinPtr JoinStepLogical::convertToPhysical(JoinActionRef & left_filter, JoinActi
 bool JoinStepLogical::hasPreparedJoinStorage() const
 {
     return prepared_join_storage;
+}
+
+std::optional<ActionsDAG> JoinStepLogical::getFilterActions(JoinTableSide side)
+{
+    if (join_info.strictness != JoinStrictness::All)
+        return {};
+
+    auto & join_expression = join_info.expression;
+    if (!join_expression.disjunctive_conditions.empty())
+        return {};
+
+    bool can_pushdown = (side == JoinTableSide::Left && isInnerOrLeft(join_info.kind))
+                     || (side == JoinTableSide::Right && isInnerOrRight(join_info.kind));
+    if (!can_pushdown)
+        return {};
+
+    ActionsDAG & actions_dag = side == JoinTableSide::Left ? expression_actions.left_pre_join_actions : expression_actions.right_pre_join_actions;
+    std::vector<JoinActionRef> & conditions = side == JoinTableSide::Left ? join_expression.condition.left_filter_conditions : join_expression.condition.right_filter_conditions;
+
+    if (auto filter_condition = concatMergeConditions(conditions, actions_dag))
+    {
+        auto new_filter_dag = actions_dag.cloneSubDAG({filter_condition.node}, /* remove_aliases */ true);
+
+        NameSet required_output_columns_set(required_output_columns.begin(), required_output_columns.end());
+        if (required_output_columns.empty() && !actions_dag.getInputs().empty())
+            required_output_columns_set.insert(actions_dag.getInputs().front()->result_name);
+        addRequiredInputToOutput(new_filter_dag, required_output_columns_set);
+        conditions.clear();
+        return new_filter_dag;
+    }
+
+    return {};
 }
 
 }

@@ -2,7 +2,6 @@
 
 #include <memory>
 #include <Analyzer/IQueryTreeNode.h>
-#include <Interpreters/Context.h>
 #include <Interpreters/ExpressionActions.h>
 #include <Interpreters/HashJoin/HashJoin.h>
 #include <Interpreters/HashTablesStatistics.h>
@@ -44,7 +43,6 @@ class ConcurrentHashJoin : public IJoin
 
 public:
     explicit ConcurrentHashJoin(
-        ContextPtr context_,
         std::shared_ptr<TableJoin> table_join_,
         size_t slots_,
         const Block & right_sample_block,
@@ -79,7 +77,7 @@ public:
 
     std::shared_ptr<IJoin> clone(const std::shared_ptr<TableJoin> & table_join_, const Block &, const Block & right_sample_block_) const override
     {
-        return std::make_shared<ConcurrentHashJoin>(context, table_join_, slots, right_sample_block_, stats_collecting_params);
+        return std::make_shared<ConcurrentHashJoin>(table_join_, slots, right_sample_block_, stats_collecting_params);
     }
 
     void onBuildPhaseFinish() override;
@@ -91,7 +89,6 @@ public:
     };
 
 private:
-    ContextPtr context;
     std::shared_ptr<TableJoin> table_join;
     size_t slots;
     std::unique_ptr<ThreadPool> pool;

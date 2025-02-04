@@ -647,15 +647,17 @@ struct NameGreaterOrEquals { static constexpr auto name = "greaterOrEquals"; };
 
 struct ComparisonParams
 {
-    bool check_decimal_overflow;
-    bool validate_enum_literals_in_operators;
-    bool allow_not_comparable_types;
+    bool check_decimal_overflow = false;
+    bool validate_enum_literals_in_operators = false;
+    bool allow_not_comparable_types = false;
 
     explicit ComparisonParams(const ContextPtr & context)
         : check_decimal_overflow(decimalCheckComparisonOverflow(context))
         , validate_enum_literals_in_operators(context->getSettingsRef()[Setting::validate_enum_literals_in_operators])
         , allow_not_comparable_types(context->getSettingsRef()[Setting::allow_not_comparable_types_in_comparison_functions])
     {}
+
+    ComparisonParams() = default;
 };
 
 template <template <typename, typename> class Op, typename Name>

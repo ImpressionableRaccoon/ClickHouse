@@ -227,6 +227,7 @@ struct SettingFieldString
 {
     String value;
     bool changed = false;
+    using ValueType = String;
 
     explicit SettingFieldString(std::string_view str = {}) : value(str) {}
     explicit SettingFieldString(const String & str) : SettingFieldString(std::string_view{str}) {}

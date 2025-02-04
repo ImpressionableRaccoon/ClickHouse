@@ -283,7 +283,7 @@ bool convertLogicalJoinToPhysical(QueryPlan::Node & node, QueryPlan::Nodes & nod
     if (join_step->areInputsSwapped() && new_right_node)
         std::swap(new_left_node, new_right_node);
 
-    const auto & settings = join_step->getContext()->getSettingsRef();
+    const auto & settings = join_step->getSettings();
 
     auto & new_join_node = nodes.emplace_back();
 
@@ -299,9 +299,9 @@ bool convertLogicalJoinToPhysical(QueryPlan::Node & node, QueryPlan::Nodes & nod
             new_left_node->step->getOutputHeader(),
             new_right_node->step->getOutputHeader(),
             join_ptr,
-            settings[Setting::max_block_size],
-            settings[Setting::min_joined_block_size_bytes],
-            settings[Setting::max_threads],
+            settings.max_block_size,
+            settings.min_joined_block_size_bytes,
+            settings.max_threads,
             NameSet(required_output_from_join.begin(), required_output_from_join.end()),
             false /*optimize_read_in_order*/,
             true /*use_new_analyzer*/);
@@ -312,7 +312,7 @@ bool convertLogicalJoinToPhysical(QueryPlan::Node & node, QueryPlan::Nodes & nod
         new_join_node.step = std::make_unique<FilledJoinStep>(
             new_left_node->step->getOutputHeader(),
             join_ptr,
-            settings[Setting::max_block_size]);
+            settings.max_block_size);
         new_join_node.children = {new_left_node};
     }
 
