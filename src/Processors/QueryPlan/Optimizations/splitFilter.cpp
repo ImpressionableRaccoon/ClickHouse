@@ -16,18 +16,19 @@ size_t trySplitFilter(QueryPlan::Node * node, QueryPlan::Nodes & nodes, const Op
     if (join_step && node->children.size() == 2)
     {
         size_t num_new_nodes = 0;
-        if (auto fitler_dag = join_step->getFilterActions(JoinTableSide::Left); fitler_dag && fitler_dag->getOutputs().size() == 1)
+
+        String filter_coumn_name;
+
+        if (auto fitler_dag = join_step->getFilterActions(JoinTableSide::Left, filter_coumn_name))
         {
-            String filter_coumn_name = fitler_dag->getOutputs().front()->result_name;
             auto * new_node = makeExpressionNodeOnTopOf(node->children.at(0), std::move(*fitler_dag), filter_coumn_name, nodes);
             node->children.at(0) = new_node;
             new_node->step->setStepDescription("Join filter");
             num_new_nodes++;
         }
 
-        if (auto fitler_dag = join_step->getFilterActions(JoinTableSide::Right); fitler_dag && fitler_dag->getOutputs().size() == 1)
+        if (auto fitler_dag = join_step->getFilterActions(JoinTableSide::Right, filter_coumn_name))
         {
-            String filter_coumn_name = fitler_dag->getOutputs().front()->result_name;
             auto * new_node = makeExpressionNodeOnTopOf(node->children.at(1), std::move(*fitler_dag), filter_coumn_name, nodes);
             node->children.at(1) = new_node;
             new_node->step->setStepDescription("Join filter");

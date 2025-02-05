@@ -34,7 +34,6 @@ JoinSettings JoinSettings::create(const Settings & query_settings)
     return join_settings;
 }
 
-
 std::string_view toString(PredicateOperator op)
 {
     switch (op)
@@ -50,15 +49,15 @@ std::string_view toString(PredicateOperator op)
 }
 
 
-String toString(const JoinActionRef & predicate)
+String toString(const JoinActionRef & node)
 {
     WriteBufferFromOwnString out;
-    out << predicate.column_name;
-    if (predicate.column_name != predicate.node->result_name)
-        out << " AS " << predicate.node->result_name;
-    out << " :: " << predicate.node->result_type->getName();
-    if (predicate.node->column)
-        out << " CONST " << predicate.node->column->dumpStructure();
+
+    const auto & column = node.getColumn();
+    out << column.name;
+    out << " :: " << column.type->getName();
+    if (column. column)
+        out << " CONST " << column. column->dumpStructure();
     return out.str();
 }
 
@@ -83,5 +82,37 @@ String toString(const JoinCondition & condition)
     );
 }
 
+
+
+JoinActionRef::JoinActionRef(const ActionsDAG::Node * node_, const ActionsDAG * actions_dag_)
+    : actions_dag(actions_dag_)
+    , column_name(node_->result_name)
+{
+}
+
+const ActionsDAG::Node * JoinActionRef::getNode() const
+{
+    const auto * node = actions_dag ? actions_dag->tryFindInOutputs(column_name) : nullptr;
+    if (!node)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot find column {} in actions DAG:\n{}",
+            column_name, actions_dag ? actions_dag->dumpDAG() : "nullptr");
+    return node;
+}
+
+ColumnWithTypeAndName JoinActionRef::getColumn() const
+{
+    const auto * node = getNode();
+    return {node->column, node->result_type, column_name};
+}
+
+const String & JoinActionRef::getColumnName() const
+{
+    return column_name;
+}
+
+DataTypePtr JoinActionRef::getType() const
+{
+    return getNode()->result_type;
+}
 
 }

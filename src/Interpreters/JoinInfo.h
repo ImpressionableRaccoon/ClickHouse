@@ -54,32 +54,43 @@ inline PredicateOperator reversePredicateOperator(PredicateOperator op)
     }
 }
 
+using ActionsDAGPtr = std::unique_ptr<ActionsDAG>;
+
 struct JoinExpressionActions
 {
     JoinExpressionActions(const ColumnsWithTypeAndName & left_columns, const ColumnsWithTypeAndName & right_columns, const ColumnsWithTypeAndName & joined_columns)
-        : left_pre_join_actions(left_columns)
-        , right_pre_join_actions(right_columns)
-        , post_join_actions(joined_columns)
+        : left_pre_join_actions(std::make_unique<ActionsDAG>(left_columns))
+        , right_pre_join_actions(std::make_unique<ActionsDAG>(right_columns))
+        , post_join_actions(std::make_unique<ActionsDAG>(joined_columns))
     {
     }
 
-    ActionsDAG left_pre_join_actions;
-    ActionsDAG right_pre_join_actions;
-    ActionsDAG post_join_actions;
+    ActionsDAGPtr left_pre_join_actions;
+    ActionsDAGPtr right_pre_join_actions;
+    ActionsDAGPtr post_join_actions;
 };
 
-struct JoinActionRef
-{
-    const ActionsDAG::Node * node;
-    String column_name;
 
-    explicit JoinActionRef(const ActionsDAG::Node * node_)
-        : node(node_) , column_name(node_ ? node_->result_name : "")
+class JoinActionRef
+{
+public:
+    explicit JoinActionRef(std::nullptr_t)
+        : actions_dag(nullptr)
     {}
 
-    ColumnWithTypeAndName getColumn() const { return {node->column, node->result_type, column_name}; }
+    explicit JoinActionRef(const ActionsDAG::Node * node_, const ActionsDAG * actions_dag_);
 
-    operator bool() const { return node != nullptr; } /// NOLINT
+    const ActionsDAG::Node * getNode() const;
+
+    ColumnWithTypeAndName getColumn() const;
+    const String & getColumnName() const;
+    DataTypePtr getType() const;
+
+    operator bool() const { return actions_dag != nullptr; } /// NOLINT
+
+private:
+    const ActionsDAG * actions_dag = nullptr;
+    String column_name;
 };
 
 /// JoinPredicate represents a single join qualifier

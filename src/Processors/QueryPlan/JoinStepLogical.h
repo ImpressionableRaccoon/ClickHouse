@@ -66,7 +66,7 @@ public:
     const JoinInfo & getJoinInfo() const { return join_info; }
     JoinInfo & getJoinInfo() { return join_info; }
 
-    std::optional<ActionsDAG> getFilterActions(JoinTableSide side);
+    std::optional<ActionsDAG> getFilterActions(JoinTableSide side, String & filter_column_name);
 
     void setSwapInputs() { swap_inputs = true; }
     bool areInputsSwapped() const { return swap_inputs; }
@@ -79,6 +79,11 @@ public:
 
 protected:
     void updateOutputHeader() override;
+
+
+    ActionsDAG & getLeftExpressionActions() { return *expression_actions.left_pre_join_actions; }
+    ActionsDAG & getRightExpressionActions() { return *expression_actions.right_pre_join_actions; }
+    ActionsDAG & getPostExpressionActions() { return *expression_actions.post_join_actions; }
 
     JoinExpressionActions expression_actions;
     JoinInfo join_info;

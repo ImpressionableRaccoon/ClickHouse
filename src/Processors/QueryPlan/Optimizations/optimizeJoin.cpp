@@ -275,10 +275,10 @@ bool convertLogicalJoinToPhysical(QueryPlan::Node & node, QueryPlan::Nodes & nod
 
     auto & join_expression_actions = join_step->getExpressionActions();
 
-    QueryPlan::Node * new_left_node = makeExpressionNodeOnTopOf(node.children.at(0), std::move(join_expression_actions.left_pre_join_actions), left_filter.column_name, nodes);
+    QueryPlan::Node * new_left_node = makeExpressionNodeOnTopOf(node.children.at(0), std::move(*join_expression_actions.left_pre_join_actions), left_filter.getColumnName(), nodes);
     QueryPlan::Node * new_right_node = nullptr;
     if (node.children.size() >= 2)
-        new_right_node = makeExpressionNodeOnTopOf(node.children.at(1), std::move(join_expression_actions.right_pre_join_actions), right_filter.column_name, nodes);
+        new_right_node = makeExpressionNodeOnTopOf(node.children.at(1), std::move(*join_expression_actions.right_pre_join_actions), right_filter.getColumnName(), nodes);
 
     if (join_step->areInputsSwapped() && new_right_node)
         std::swap(new_left_node, new_right_node);
@@ -294,7 +294,7 @@ bool convertLogicalJoinToPhysical(QueryPlan::Node & node, QueryPlan::Nodes & nod
             addSortingForMergeJoin(fsmjoin, new_left_node, new_right_node, nodes,
                 join_step->getSortingSettings(), join_step->getJoinSettings(), join_step->getJoinInfo());
 
-        auto required_output_from_join = join_expression_actions.post_join_actions.getRequiredColumnsNames();
+        auto required_output_from_join = join_expression_actions.post_join_actions->getRequiredColumnsNames();
         new_join_node.step = std::make_unique<JoinStep>(
             new_left_node->step->getOutputHeader(),
             new_right_node->step->getOutputHeader(),
@@ -317,11 +317,11 @@ bool convertLogicalJoinToPhysical(QueryPlan::Node & node, QueryPlan::Nodes & nod
     }
 
     if (!post_filter)
-        node.step = std::make_unique<ExpressionStep>(new_join_node.step->getOutputHeader(), std::move(join_expression_actions.post_join_actions));
+        node.step = std::make_unique<ExpressionStep>(new_join_node.step->getOutputHeader(), std::move(*join_expression_actions.post_join_actions));
     else
     {
-        bool remove_filter = !output_header.has(post_filter.column_name);
-        node.step = std::make_unique<FilterStep>(new_join_node.step->getOutputHeader(), std::move(join_expression_actions.post_join_actions), post_filter.column_name, remove_filter);
+        bool remove_filter = !output_header.has(post_filter.getColumnName());
+        node.step = std::make_unique<FilterStep>(new_join_node.step->getOutputHeader(), std::move(*join_expression_actions.post_join_actions), post_filter.getColumnName(), remove_filter);
     }
     node.children = {&new_join_node};
     return true;
