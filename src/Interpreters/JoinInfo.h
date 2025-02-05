@@ -201,7 +201,7 @@ String toString(const JoinCondition & condition);
     M(UInt64, join_to_sort_maximum_table_rows) \
     M(Bool, allow_experimental_join_right_table_sorting) \
     M(UInt64, min_joined_block_size_bytes) \
-    M(UInt64, max_threads) \
+    M(MaxThreads, max_threads) \
 
 
 /// Subset of query settings that are relevant to join and used to configure join algorithms.

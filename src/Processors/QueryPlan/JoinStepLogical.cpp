@@ -790,37 +790,41 @@ bool JoinStepLogical::hasPreparedJoinStorage() const
 
 std::optional<ActionsDAG> JoinStepLogical::getFilterActions(JoinTableSide side, String & filter_column_name)
 {
-    if (join_info.strictness != JoinStrictness::All)
-        return {};
-
-    auto & join_expression = join_info.expression;
-    if (!join_expression.disjunctive_conditions.empty())
-        return {};
-
-    bool can_pushdown = (side == JoinTableSide::Left && isInnerOrLeft(join_info.kind))
-                     || (side == JoinTableSide::Right && isInnerOrRight(join_info.kind));
-    if (!can_pushdown)
-        return {};
-
-    const ActionsDAGPtr & actions_dag = side == JoinTableSide::Left ? expression_actions.left_pre_join_actions : expression_actions.right_pre_join_actions;
-    std::vector<JoinActionRef> & conditions = side == JoinTableSide::Left ? join_expression.condition.left_filter_conditions : join_expression.condition.right_filter_conditions;
-
-    if (auto filter_condition = concatMergeConditions(conditions, actions_dag))
-    {
-        filter_column_name = filter_condition.getColumnName();
-        conditions.clear();
-        ActionsDAG new_dag(actions_dag->getResultColumns());
-        new_dag.getOutputs() = new_dag.getInputs();
-        ActionsDAG result = std::move(*actions_dag);
-        *actions_dag = std::move(new_dag);
-        return result;
-
-        // auto new_filter_dag = actions_dag->split({filter_condition.getNode()}, false);
-        // *actions_dag = std::move(new_filter_dag.second);
-        // return std::move(new_filter_dag.first);
-    }
-
+    UNUSED(side);
+    UNUSED(filter_column_name);
     return {};
+
+    // if (join_info.strictness != JoinStrictness::All)
+    //     return {};
+
+    // auto & join_expression = join_info.expression;
+    // if (!join_expression.disjunctive_conditions.empty())
+    //     return {};
+
+    // bool can_pushdown = (side == JoinTableSide::Left && isInnerOrLeft(join_info.kind))
+    //                  || (side == JoinTableSide::Right && isInnerOrRight(join_info.kind));
+    // if (!can_pushdown)
+    //     return {};
+
+    // const ActionsDAGPtr & actions_dag = side == JoinTableSide::Left ? expression_actions.left_pre_join_actions : expression_actions.right_pre_join_actions;
+    // std::vector<JoinActionRef> & conditions = side == JoinTableSide::Left ? join_expression.condition.left_filter_conditions : join_expression.condition.right_filter_conditions;
+
+    // if (auto filter_condition = concatMergeConditions(conditions, actions_dag))
+    // {
+    //     filter_column_name = filter_condition.getColumnName();
+    //     conditions.clear();
+    //     ActionsDAG new_dag(actions_dag->getResultColumns());
+    //     new_dag.getOutputs() = new_dag.getInputs();
+    //     ActionsDAG result = std::move(*actions_dag);
+    //     *actions_dag = std::move(new_dag);
+    //     return result;
+
+    //     // auto new_filter_dag = actions_dag->split({filter_condition.getNode()}, false);
+    //     // *actions_dag = std::move(new_filter_dag.second);
+    //     // return std::move(new_filter_dag.first);
+    // }
+
+    // return {};
 }
 
 }
